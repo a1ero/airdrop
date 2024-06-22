@@ -1,0 +1,470 @@
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Handles container movement and initiates spawn of zombies & loot ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class AirdropContainerBase : House //HouseNoDestruct	//Building	//House
+{
+	// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	const int m_SecsPerMin  = 60;		// Time - Seconds to minutes conversion
+	const int m_Miliseconds = 1000;		// Time - Seconds to miliseconds conversion
+	const float ShowValue   = 0.0;		// The value set to show the parachute
+	const float HideValue   = 100.0;	// The value set to hide the parachute
+	// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	ref Timer m_Timer;					// Timer controlling movement of container
+	ref AirdropSettings m_Settings;		// Reference to main Airdrop settings (passen in)
+	ref AD_DropType m_DropType;			// Reference to the drop type speciified in AirdropPlane
+	// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	Weather m_Weather;					// Refernce to game weather
+	vector m_WindVector;				// Current wind vector
+	// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	protected Particle m_ParticleEfx;	// Refernce to particle effect
+	protected Particle m_SmokeEfx;		// Refernce to smike effect
+	protected bool m_IsActive;			// Is the container active (true = yes, false = no {default})
+	protected bool m_Loot;				// Is the loot dropped? (true = yes, false = no {default})
+	protected bool m_Unstuck;			// Is the container unstuck/uprighted? (true = yes, false = no {default})
+	protected bool m_Grounded;			// Is the container on the ground? (true = yes, false = no {default})
+	protected bool m_Parachute;	        // Is the Parachute Open or Closed (true or false)
+	protected bool m_BodySet;	        // 
+	// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	FileHandle m_LogFile;				// Reference to log file
+	string m_LogMessage;				// Message to be logged (temp)
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	void AirdropContainerBase()
+	{
+		// Register synced vars
+		RegisterNetSyncVariableBool("m_IsActive");
+		RegisterNetSyncVariableBool("m_Loot");
+		RegisterNetSyncVariableBool("m_Unstuck");
+		RegisterNetSyncVariableBool("m_Grounded");
+		RegisterNetSyncVariableBool("m_Parachute");
+		RegisterNetSyncVariableBool("m_BodySet");
+		// Initialize container
+		EOnInit();
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	override void OnVariablesSynchronized()
+	{
+		super.OnVariablesSynchronized();
+		if (m_Parachute) {
+			SetAnimationPhase("parachute", 0.0);
+		}
+		else {
+			SetAnimationPhase("parachute", 1.0);
+		}
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	void ~AirdropContainerBase()
+	{
+		// Send closing message
+		AD_LogMessage("[~AirdropContainerBase] Container Destroyed on " + AirdropBase.ADU_GetFileDateTimeStamp());
+		//  If we have a file
+		if (m_LogFile) {
+			// Close file
+			CloseFile(m_LogFile);
+		}
+		// If we have a smoke effect 1
+		if (m_ParticleEfx) {
+			// Close effect
+			m_ParticleEfx.Stop();
+			AD_LogMessage("[~AirdropContainerBase] Airdrop Smoke 1 stopped.");
+		}
+		// If we have a smoke effect 2
+		if (m_SmokeEfx) {
+			// Stop effect
+			m_SmokeEfx.Stop();
+			AD_LogMessage("[~AirdropContainerBase] Airdrop Smoke 2 stopped.");
+		}
+		// If we have timer
+		if (m_Timer)
+		{
+			// Stop timer
+			AD_LogMessage("[~AirdropContainerBase] Timer stopped/removed.");
+			m_Timer.Stop();
+			delete m_Timer;
+		}
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	void EOnInit()
+	{
+		AD_LogMessage("[EOnInit] Start");
+		vector m_TempPos = GetPosition();
+		vector m_TempOri = GetOrientation();
+		// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+		// Reorientate the container		
+		if (GetGame().IsServer())
+		{
+			SetOrientation(Vector(GetOrientation()[0], 0, 0));
+			SetDirection(GetDirection());
+			m_Timer = new Timer();
+			m_Timer.Run(0.03333, this, "AirdropContainerFall", NULL, true);
+			AD_LogMessage("[EOnInit] Container Fall Started.");
+		}
+		// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	void InitializeContainer(AirdropSettings settings, AD_DropType droptype)
+	{
+		// If settings were passed in...
+		if (settings && droptype) {
+			// Set Container parameters
+			m_IsActive = true;
+			m_Loot = false;
+			m_Unstuck = false;
+			m_Grounded = false;
+			m_Parachute = true;
+			m_BodySet = false;
+			m_Settings = settings;
+			m_DropType = droptype;
+			// If we want a log file  for this container then create it
+			string datetimestamp = AirdropBase.ADU_GetFileDateTimeStamp();
+			if (m_Settings.Controls.AD_LogContainer != 0) {
+				m_LogFile = OpenFile(TEXT_PATH_LOGS_AIRDROP + datetimestamp + " AirdropContainer.log", FileMode.WRITE);
+			}
+			// Log status
+			AD_LogMessage("[InitializeContainer] Container created on " + datetimestamp);
+			// Get current game weather
+			m_Weather = g_Game.GetWeather();
+			// Delete the container after a time set by airdrop interval 
+			GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ObjectDelete, m_Settings.Container.Lifespan * m_SecsPerMin * m_Miliseconds, false, this);
+			// Creation of the container
+			AD_LogMessage("[InitializeContainer] Winds: Vector " + m_Weather.GetWind() + ", Speed " + m_Weather.GetWindSpeed() + "mps, Strength " + m_Settings.Container.WindStrength);
+			// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+			// If we are on the client side
+			if (GetGame().IsClient() || !GetGame().IsMultiplayer()) {
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+				AD_LogMessage("[InitializeContainer] Airdrop Animation Phase (" + ShowValue + "): " + GetAnimationPhase("parachute"));
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+				// Initialize effects
+				m_ParticleEfx = Particle.PlayOnObject(ParticleList.ADU_AIRDROP_SMOKE1, this, GetMemoryPointPos("light"));
+				m_SmokeEfx    = Particle.PlayOnObject(ParticleList.ADU_AIRDROP_SMOKE2, this, GetMemoryPointPos("light"));
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+				// If we have a particle effect and we want Smoke 1
+				if (m_ParticleEfx && (m_Settings.Controls.SmokeTrails == 0 || m_Settings.Controls.SmokeTrails == 2 )) {
+					// Close effect
+					m_ParticleEfx.Stop();
+					AD_LogMessage("[InitializeContainer] Airdrop Smoke 1 stopped.");
+				}
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+				// If we have a particle effect and we want Smoke 2
+				if (m_SmokeEfx && (m_Settings.Controls.SmokeTrails == 0 || m_Settings.Controls.SmokeTrails == 1 )) {
+					// Stop effect
+					m_SmokeEfx.Stop();
+					AD_LogMessage("[InitializeContainer] Airdrop Smoke 2 stopped.");
+				}
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+			}
+			// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+			SetSynchDirty();
+		}
+		else {
+			// Log status
+			AirdropBase.ADU_SendClientMessages(AIRDROP_ICON_AIRDROP_DROP, "[InitializeContainer] Container NOT Initialized.  You are NOT allowed to spawn in AirdropContainers!", 3, 30, ARGB(255, 128, 0, 0));
+		}
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	void AD_LogMessage(string message) {
+		// If we have a file... 
+		if (m_LogFile && m_Settings.Controls.AD_LogContainer != 0) {
+			// Write message
+			FPrintln(m_LogFile, AirdropBase.ADU_GetFileDateTimeStamp(true) + ":  " + message);
+		}
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	void AirdropContainerFall()
+	{
+		// >>> Need to halt the fall timer once container is unstucl, parachute hidden and loot is spawned <<<
+		// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+		// If the container is active
+		if (m_IsActive) {
+			// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+			// If we are on the ground...
+			if (IsGround(m_Settings.Container.TriggerAGL) && !m_Grounded) {
+				m_Grounded = true;
+				AD_LogMessage("[AirdropContainerFall] Airdrop Container Touchdown.");
+			}
+			// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+			// If we are on the client
+			if (GetGame().IsClient() || !GetGame().IsMultiplayer()) 
+			{
+				// If we are not on the ground and the parachute is out... 
+				if (m_Grounded && m_Parachute)
+				{
+					//SetAnimationPhase("parachute", HideValue);
+					m_Parachute = false;
+					AD_LogMessage("[AirdropContainerFall] Airdrop Animation Phase (" + HideValue + "): " + GetAnimationPhase("parachute"));
+				}
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+				// If we have a particle effect and we want Smoke 1
+				//if (m_ParticleEfx && (m_Settings.Controls.SmokeTrails == 1 || m_Settings.Controls.SmokeTrails == 3 )) {
+					// Close effect
+				//	m_ParticleEfx.PlayParticle(m_ParticleEfx.GetParticleID());
+				//	AD_LogMessage("[EOnInit] Airdrop Smoke 1 started.");
+				//}
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+				// If we have a particle effect and we want Smoke 2
+				//if (m_ParticleEfx && (m_Settings.Controls.SmokeTrails == 2 || m_Settings.Controls.SmokeTrails == 3 )) {
+					// Stop effect
+				//	m_SmokeEfx.PlayParticle(m_SmokeEfx.GetParticleID());
+				//	AD_LogMessage("[EOnInit] Airdrop Smoke 2 started.");
+				//}
+				// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+			}
+			// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+			// If we are on the server
+			if (GetGame().IsServer())
+			{
+				// If we are not on the ground... 
+				if (!m_Grounded)
+				{
+					// If we have velocity move the container towards the ground...
+					if (GetVelocity(this).Length() >= 0)
+					{
+						CreateDynamicPhysics(PhxInteractionLayers.DYNAMICITEM);
+						EnableDynamicCCD(true);
+						SetOrientation(Vector(GetOrientation()[0], 0, 0));
+					
+						// Caclulate wind drift (if requested)
+						if (m_Settings.Container.WindStrength == 0) {
+							// Update container movement
+							SetVelocity(this, Vector(0, -m_Settings.Container.FallRate, 0));
+						}
+						else {
+							// Get the current wind vector
+							vector winddrift = (GetWindDrift() * m_Settings.Container.WindStrength);
+							// Update container movement adding wind vector
+							SetVelocity(this, Vector(winddrift[0], -m_Settings.Container.FallRate, winddrift[2]));
+						}
+					}
+				} // If we are on the ground...
+				else {
+					// If we haven't dropped loot...
+					if (!m_Loot)
+					{
+						// Store current drop location & object
+						vector drop_point = GetPosition();
+						vector m_SpawnPoint;
+						ItemBase dropped_item;
+						string item;
+						// Set lifespan text
+						string LifespanSet;
+						int LifespanSeconds = m_DropType.Lifespan * m_SecsPerMin;
+						int ct;
+						if (LifespanSeconds > 0) {
+							LifespanSet = LifespanSet.Format("Lifespan:  Set to %1 minutes.", m_DropType.Lifespan);
+						}
+						else {
+							LifespanSet = "Lifespan:  Set by economy.";
+						}
+						// If there is loot to be spawned?
+						if (m_DropType.Items.Count() > 0) {
+							// If we are spawning ALL items
+							if (m_DropType.Quantity == 0) {
+								// Log spaw info
+								AD_LogMessage("[AirdropContainerFall] Drop Type '" + m_DropType.Title + "', Container: '" + m_DropType.Container + "', Mode/Quantity/Iems: All/" + m_DropType.Quantity + "/" + m_DropType.Items.Count() + ", Flare:  " + m_DropType.AddFlare + "%");
+								// For each item in the list
+								for (int i1 = 0; i1 < m_DropType.Items.Count(); i1++)
+								{
+									// Calculate random point in vacinity
+									m_SpawnPoint = AirdropBase.ADU_RandomWithinCircle(drop_point, m_DropType.SpawnMin, m_DropType.SpawnMax, true, m_DropType.SpawnOffset);
+									// Spawn random item at point
+									item = m_DropType.Items[i1];
+									// Spawn Item
+									dropped_item = ItemBase.Cast(GetGame().CreateObject(item, m_SpawnPoint, false, true));
+									// If we didn't spawn an item...
+									ct = i1 + 1;
+									if (!dropped_item) {
+										// Log spaw item failure
+										AD_LogMessage("[AirdropContainerFall] Spawn failed for item [" + ct + "] '" + item + "', it does not exist in DayZ!");
+									}
+									else {
+										// If Lifespan is greater than zero...
+										if (LifespanSeconds > 0) {
+											// Set item lifespan
+											dropped_item.SetLifetime(LifespanSeconds);
+										}
+										// Log the item spawned
+										AD_LogMessage("[AirdropContainerFall] Loot Spawned [" + ct + "] " + item + " @ " + m_SpawnPoint + " ... " + LifespanSet);
+									}
+								}
+							}
+							else {
+								// Log spaw info
+								AD_LogMessage("[AirdropContainerFall] Drop Type '" + m_DropType.Title + "', Container: '" + m_DropType.Container + "', Mode/Quantity/Iems: Random/" + m_DropType.Quantity + "/" + m_DropType.Items.Count() + ", Flare:  " + m_DropType.AddFlare + "%");
+								// For each item to be spawned
+								for (int i2 = 1; i2 <= m_DropType.Quantity; i2++)
+								{
+									// Calculate random point within prop point vacinity
+									m_SpawnPoint = AirdropBase.ADU_RandomWithinCircle(drop_point, m_DropType.SpawnMin, m_DropType.SpawnMax, true, m_DropType.SpawnOffset);
+									// Spawn random item at point
+									item = m_DropType.Items.GetRandomElement();
+									// Spawn Item
+									dropped_item = ItemBase.Cast(GetGame().CreateObject(item, m_SpawnPoint, false, true));
+									// If we didn't spawn an item...
+									if (!dropped_item) {
+										// Log spaw item failure
+										AD_LogMessage("[AirdropContainerFall] Spawn failed for item [" + i2 + "] '" + item + "', does not exist in DayZ!");
+									}
+									else {
+										// If Lifespan is greater than zero...
+										if (LifespanSeconds > 0) {
+											// Set item lifespan
+											dropped_item.SetLifetime(LifespanSeconds);
+										}
+										// Log the item spawned
+										AD_LogMessage("[AirdropContainerFall] Loot Spawned [" + i2 + "] " + item + " @ " + m_SpawnPoint + " ... " + LifespanSet);
+									}
+								}
+							}
+						}
+						else {
+							AD_LogMessage("[AirdropContainerFall] Drop Type Error '" + m_DropType.Title + "', Container: '" + m_DropType.Container + "', There are no items in the list to spawn!");
+						}
+						// Check if we need to add an Airdrop flare
+						if (m_DropType.AddFlare != 0) {
+							// If add flase is 100 or less thatn a random number between 0 and 100
+							if (m_DropType.AddFlare == 100 || Math.RandomFloat(0, 100) <= m_DropType.AddFlare) {
+								// Calculate random point within prop point vacinity
+								m_SpawnPoint = AirdropBase.ADU_RandomWithinCircle(drop_point, m_DropType.SpawnMin, m_DropType.SpawnMax, true, m_DropType.SpawnOffset);
+								// Spawn AirdropFlare
+								dropped_item = ItemBase.Cast(GetGame().CreateObject(TEXT_ITEM_AIRDROPFLARE, m_SpawnPoint, false, true));
+								// If we didn't spawn an item...
+								if (!dropped_item) {
+									// Log spaw item failure
+									AD_LogMessage("[AirdropContainerFall] Spawn failed for item '" + TEXT_ITEM_AIRDROPFLARE + "', does not exist in DayZ!");
+								}
+								else {
+									// If Lifespan is greater than zero...
+									if (LifespanSeconds > 0) {
+										// Set item lifespan
+										dropped_item.SetLifetime(LifespanSeconds);
+									}
+									// Log the item spawned
+									AD_LogMessage("[AirdropContainerFall] Airdrop Flare Spawned @ " + m_SpawnPoint + " ... " + LifespanSet);
+								}
+							}
+						}
+						// Flag that loot has been spawned
+						m_Loot = true;
+						SetSynchDirty();
+						// If the ocntainer hasn't yet been unstuck...
+						if (!m_Unstuck) 
+						{
+							// Start upstuck timer
+							GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(AirdropContainerUnstuck, m_Settings.Container.StandUpTimer * m_Miliseconds, false);
+						}
+						// Set physics
+						//if (!dBodyIsSet(this) && !m_BodySet)
+						//{
+						//	CreateDynamicPhysics(PhxInteractionLayers.DYNAMICITEM);
+						//	EnableDynamicCCD(true);
+						//	m_BodySet = true;
+						//	SetSynchDirty();
+						//	AD_LogMessage("[AirdropContainerFall] Airdrop Container Create Dynamic Physics.");
+						//}
+					}
+				}
+			}
+			// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+		}
+		else {
+			// If this objec tis player spawned then delete it immediately
+			GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(GetGame().ObjectDelete, 0, false, this);
+		}
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	private vector GetWindDrift() {
+		// Get current game weather
+		m_Weather = g_Game.GetWeather();
+		// Calculate the wind vector to push the container in the direction of the relative wind
+		m_WindVector = m_Weather.GetWind() * (m_Settings.Container.WindStrength * 0.25);
+		return m_WindVector;
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	void AirdropContainerUnstuck()
+	{
+		if (!m_Unstuck) {
+			SetVelocity(this, Vector(0, 0, 0));
+			dBodySetAngularVelocity(this, Vector(0, 0, 0));
+			dBodyActive(this, ActiveState.INACTIVE);
+			dBodyDynamic(this, false);
+			SetDirection(GetDirection());
+			SetOrientation(Vector(GetOrientation()[0], 0, 0));
+			if (!IsObject())
+			{
+				PlaceOnSurface();
+				SetPosition(Vector(GetPosition()[0], GetGame().SurfaceY(GetPosition()[0], GetPosition()[2]), GetPosition()[2]));
+			}
+			m_Unstuck = true;
+			SetSynchDirty();
+			AD_LogMessage("[AirdropContainerUnstuck 6] Container was unstuck.");
+		}
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/*
+	private void AD_ToggleParachute(string CelledFrom, float phaseValue)
+	{
+		// Get current parachute animation phase
+		float tPhase = GetAnimationPhase("parachute");
+		// Toggle the parachute Show/Hide state
+		SetAnimationPhase("parachute", phaseValue);
+		// Set parachute state based on Show & Hide values
+		SetSynchDirty();
+		AD_LogMessage("[AD_ToggleParachute." + CelledFrom + "] Airdrop Animation Phase: " + tPhase  + " to " + GetAnimationPhase("parachute"));
+	}
+*/
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	bool IsGround(float height)
+	{
+		// Test if an object is within the containers (downward) raycast distance
+		vector m_Start = this.GetPosition();
+		vector m_End = this.GetPosition() - Vector(0, height, 0);
+		vector m_Hit;
+		vector m_HitPos;
+		int m_HitIndex;
+		return DayZPhysics.RaycastRV(m_Start, m_End, m_HitPos, m_Hit, m_HitIndex, NULL, NULL, this);
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	bool IsObject()
+	{
+		// Need to return the object hit and determine if it is something we can land on.
+		set<Object> objects = new set<Object>;
+		objects.Clear();
+		vector m_Start = this.GetPosition();
+		vector m_End = this.GetPosition() - Vector(0, 5, 0);
+		vector m_Hit;
+		vector m_HitPos;
+		int m_HitIndex;
+		DayZPhysics.RaycastRV(m_Start, m_End, m_HitPos, m_Hit, m_HitIndex, objects, NULL, this);
+		return objects.Count() != 0;
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	override bool IsInventoryVisible()
+	{
+		return true;
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	override bool CanUseConstruction()
+	{
+		return true;
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	override bool CanPutIntoHands(EntityAI parent)
+	{
+		return false;
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	override bool CanPutInCargo(EntityAI parent)
+	{
+		return false;
+	}
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+}
